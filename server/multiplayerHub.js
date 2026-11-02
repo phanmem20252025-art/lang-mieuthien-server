@@ -778,21 +778,35 @@ function setupMultiplayerHub(httpServer) {
             avatar: playerInfo.avatar || "👨‍🌾",
             speaking: !!data.speaking,
           });
+        } else if (data.type === "voiceChunk" || data.type === "voice_chunk") {
+          // KÊNH THOẠI TOÀN LÀNG: Phát sóng âm thanh voiceChunk trực tiếp tới toàn bộ người chơi (wss.clients)
+          const chunkMsg = JSON.stringify({
+            type: "voiceChunk",
+            senderId: playerInfo?.id || data.senderId,
+            senderName: playerInfo?.name || data.senderName || "Dân Làng",
+            mimeType: data.mimeType || "audio/webm",
+            audioBuffer: data.audioBuffer,
+          });
+          for (const client of wss.clients) {
+            if (client !== ws && client.readyState === 1 /* OPEN */) {
+              client.send(chunkMsg);
+            }
+          }
         } else if (data.type === "voice_pcm") {
           // BẢO CHỨNG KÊNH THOẠI TOÀN LÀNG: Phát sóng âm thanh giọng nói trực tiếp qua WebSocket
           // Đảm bảo 100% người dùng trên 4G Viettel/Vina, iPhone Safari, Android Brave nghe thấy nhau tức thì
           const chunkMsg = JSON.stringify({
             type: "voice_pcm",
-            senderId: playerInfo.id,
-            userId: playerInfo.userId,
-            name: playerInfo.name,
-            avatar: playerInfo.avatar || "👨‍🌾",
+            senderId: playerInfo?.id || data.senderId,
+            userId: playerInfo?.userId || data.userId,
+            name: playerInfo?.name || data.name || "Dân Làng",
+            avatar: playerInfo?.avatar || "👨‍🌾",
             pcm: data.pcm,
             sampleRate: data.sampleRate || 16000,
           });
-          for (const targetPlayer of onlinePlayers.values()) {
-            if (targetPlayer.ws && targetPlayer.ws !== ws && targetPlayer.ws.readyState === 1) {
-              targetPlayer.ws.send(chunkMsg);
+          for (const client of wss.clients) {
+            if (client !== ws && client.readyState === 1 /* OPEN */) {
+              client.send(chunkMsg);
             }
           }
         } else if (data.type === "executeFarmAction" || data.type === "execute_farm_action") {
