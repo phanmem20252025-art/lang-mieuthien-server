@@ -75,9 +75,9 @@ const server = http.createServer((req, res) => {
   }
 
   // Health check endpoint cho Cloud (Koyeb / Render / Fly.io / UptimeRobot)
-  if (req.url === "/health" || req.url === "/ping") {
+  if (req.url === "/health" || req.url === "/ping" || req.url === "/version") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", app: "Lang Mieuthien Multiplayer Server", uptime: process.uptime() }));
+    res.end(JSON.stringify({ status: "ok", app: "Lang Mieuthien Multiplayer Server", uptime: process.uptime(), commit: "2ed84d2", version: "2.1.0" }));
     return;
   }
 
