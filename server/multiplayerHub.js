@@ -767,6 +767,7 @@ function setupMultiplayerHub(httpServer) {
           const chunkMsg = JSON.stringify({
             type: "voice_pcm",
             senderId: playerInfo.id,
+            userId: playerInfo.userId,
             name: playerInfo.name,
             avatar: playerInfo.avatar || "👨‍🌾",
             pcm: data.pcm,
