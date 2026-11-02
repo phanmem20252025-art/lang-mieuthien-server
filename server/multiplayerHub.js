@@ -379,8 +379,10 @@ function setupMultiplayerHub(httpServer) {
     socketToUser.set(ws, clientUserId);
 
     ws.userId = clientUserId;
+    ws.playerId = playerId;
     ws.username = playerName;
     ws.gender = playerGender;
+    ws.avatar = defaultAvatar;
 
     // Gửi dữ liệu khởi tạo cho client
     ws.send(
@@ -469,6 +471,58 @@ function setupMultiplayerHub(httpServer) {
     ws.on("message", (raw) => {
       try {
         const data = JSON.parse(raw.toString());
+
+        // 1. KÊNH THOẠI TRỰC TIẾP: Xử lý ngay lập tức không bị cản trở bởi session / player record
+        if (data.type === "voiceChunk" || data.type === "voice_chunk" || data.type === "incomingVoice") {
+          if (!data || !data.audioBuffer) return;
+
+          const senderId = data.senderId || ws.playerId || playerId;
+          const senderName = data.senderName || ws.username || playerName || "Dân Làng";
+          const mimeType = data.mimeType || "audio/webm";
+
+          console.log(`[VOICE SERVER] Nhận từ ${senderName} (${senderId}) - Broadcast tới ${wss.clients.size - 1} người chơi khác`);
+
+          const broadcastPayload = JSON.stringify({
+            type: "incomingVoice",
+            event: "incomingVoice",
+            senderId: senderId,
+            senderName: senderName,
+            mimeType: mimeType,
+            audioBuffer: data.audioBuffer,
+          });
+
+          // 2. Chuyển tiếp ngay lập tức tới TẤT CẢ người chơi khác (Broadcast toàn hệ thống)
+          for (const client of wss.clients) {
+            if (client !== ws && client.readyState === 1 /* OPEN */) {
+              client.send(broadcastPayload);
+            }
+          }
+          return;
+        }
+
+        if (data.type === "voice_pcm") {
+          if (!data || !data.pcm) return;
+          const senderId = data.senderId || ws.playerId || playerId;
+          const senderName = data.name || ws.username || playerName || "Dân Làng";
+
+          const pcmPayload = JSON.stringify({
+            type: "voice_pcm",
+            senderId: senderId,
+            userId: data.userId || ws.userId || clientUserId,
+            name: senderName,
+            avatar: data.avatar || ws.avatar || "👨‍🌾",
+            pcm: data.pcm,
+            sampleRate: data.sampleRate || 16000,
+          });
+
+          for (const client of wss.clients) {
+            if (client !== ws && client.readyState === 1 /* OPEN */) {
+              client.send(pcmPayload);
+            }
+          }
+          return;
+        }
+
         const curUserId = socketToUser.get(ws);
         const playerInfo = curUserId ? onlinePlayers.get(curUserId) : null;
         if (!playerInfo) return;
@@ -778,37 +832,6 @@ function setupMultiplayerHub(httpServer) {
             avatar: playerInfo.avatar || "👨‍🌾",
             speaking: !!data.speaking,
           });
-        } else if (data.type === "voiceChunk" || data.type === "voice_chunk") {
-          // KÊNH THOẠI TOÀN LÀNG: Phát sóng âm thanh voiceChunk trực tiếp tới toàn bộ người chơi (wss.clients)
-          const chunkMsg = JSON.stringify({
-            type: "voiceChunk",
-            senderId: playerInfo?.id || data.senderId,
-            senderName: playerInfo?.name || data.senderName || "Dân Làng",
-            mimeType: data.mimeType || "audio/webm",
-            audioBuffer: data.audioBuffer,
-          });
-          for (const client of wss.clients) {
-            if (client !== ws && client.readyState === 1 /* OPEN */) {
-              client.send(chunkMsg);
-            }
-          }
-        } else if (data.type === "voice_pcm") {
-          // BẢO CHỨNG KÊNH THOẠI TOÀN LÀNG: Phát sóng âm thanh giọng nói trực tiếp qua WebSocket
-          // Đảm bảo 100% người dùng trên 4G Viettel/Vina, iPhone Safari, Android Brave nghe thấy nhau tức thì
-          const chunkMsg = JSON.stringify({
-            type: "voice_pcm",
-            senderId: playerInfo?.id || data.senderId,
-            userId: playerInfo?.userId || data.userId,
-            name: playerInfo?.name || data.name || "Dân Làng",
-            avatar: playerInfo?.avatar || "👨‍🌾",
-            pcm: data.pcm,
-            sampleRate: data.sampleRate || 16000,
-          });
-          for (const client of wss.clients) {
-            if (client !== ws && client.readyState === 1 /* OPEN */) {
-              client.send(chunkMsg);
-            }
-          }
         } else if (data.type === "executeFarmAction" || data.type === "execute_farm_action") {
           const fId = String(data.farmId || playerInfo.farmId).replace("farm_", "");
           const farmRoom = `farm_${fId}`;
