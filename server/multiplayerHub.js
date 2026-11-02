@@ -12,7 +12,25 @@ if (!fs.existsSync(FARMS_DIR)) {
 }
 
 const farmStates = new Map(); // farmId -> { farmState, bumpkin, name, avatar, updatedAt }
-const clients = new Map(); // ws -> player info
+
+// =========================================================================
+// QUẢN LÝ SESSION NGƯỜI CHƠI BẰNG MAP VỚI KEY CỐ ĐỊNH (CHỐNG GHOST SOCKETS)
+// =========================================================================
+// onlinePlayers: Map<userId, PlayerRecord>
+// socketToUser:  Map<ws, userId>
+const onlinePlayers = new Map();
+const socketToUser = new Map();
+
+function getCanonicalUserId(params) {
+  if (!params) return null;
+  const raw =
+    params.userId ||
+    (params.farmId ? `farm_${params.farmId}` : null) ||
+    params.username ||
+    params.name;
+  if (!raw) return null;
+  return String(raw).trim().toLowerCase();
+}
 
 function getFarmState(farmId) {
   const fId = String(farmId || "").replace("farm_", "");
@@ -31,7 +49,7 @@ function getFarmState(farmId) {
   }
 
   // Kiểm tra người chơi đang online có farmId này không
-  for (const info of clients.values()) {
+  for (const info of onlinePlayers.values()) {
     if (String(info.farmId) === fId && info.farmState) {
       return {
         farmId: fId,
@@ -83,7 +101,6 @@ function saveFarmState(farmId, data) {
 function setupMultiplayerHub(httpServer) {
   if (!httpServer) return;
 
-  // Sử dụng noServer: true để không xung đột với WebSocket HMR của Vite
   const wss = new WebSocketServer({ noServer: true });
 
   httpServer.on("upgrade", (request, socket, head) => {
@@ -106,11 +123,11 @@ function setupMultiplayerHub(httpServer) {
 
   function broadcast(data, excludeWs = null) {
     const payload = JSON.stringify(data);
-    wss.clients.forEach((client) => {
-      if (client !== excludeWs && client.readyState === 1 /* OPEN */) {
-        client.send(payload);
+    for (const player of onlinePlayers.values()) {
+      if (player.ws && player.ws !== excludeWs && player.ws.readyState === 1 /* OPEN */) {
+        player.ws.send(payload);
       }
-    });
+    }
   }
 
   function broadcastToRoom(roomId, data, excludeWs = null) {
@@ -118,68 +135,125 @@ function setupMultiplayerHub(httpServer) {
     const payload = JSON.stringify(data);
     const targetFarmId = roomId.startsWith("farm_") ? roomId.replace("farm_", "") : null;
 
-    for (const [clientWs, info] of clients.entries()) {
+    for (const player of onlinePlayers.values()) {
       const isTarget =
-        info.roomId === roomId ||
-        (targetFarmId && String(info.farmId) === targetFarmId);
+        player.roomId === roomId ||
+        player.currentRoom === roomId ||
+        (targetFarmId && String(player.farmId) === targetFarmId);
 
       if (
         isTarget &&
-        clientWs !== excludeWs &&
-        clientWs.readyState === 1 /* OPEN */
+        player.ws &&
+        player.ws !== excludeWs &&
+        player.ws.readyState === 1 /* OPEN */
       ) {
-        clientWs.send(payload);
+        player.ws.send(payload);
       }
     }
   }
 
-  function getPeersInRoom(roomId, excludeWs = null) {
+  function getOnlinePlayersList() {
+    return Array.from(onlinePlayers.values()).map((p) => ({
+      id: p.id,
+      userId: p.userId,
+      name: p.username || p.name,
+      username: p.username || p.name,
+      gender: p.gender || "male",
+      avatar: p.avatar || "👨‍🌾",
+      farmId: p.farmId,
+      roomId: p.roomId || p.currentRoom,
+      currentRoom: p.currentRoom || p.roomId,
+      level: p.level || 1,
+      ripeCrops: p.ripeCrops || 0,
+      ripeCropsCount: p.ripeCrops || 0,
+      isMicOn: !!p.isMicOn,
+      isMicActive: !!p.isMicOn,
+      isSpeaking: !!p.isSpeaking,
+      bumpkin: p.bumpkin || null,
+      x: p.x || 0,
+      y: p.y || 0,
+    }));
+  }
+
+  function broadcastOnlineFarms() {
+    const uniqueList = getOnlinePlayersList();
+    const count = uniqueList.length;
+
+    broadcast({
+      type: "players_update",
+      players: uniqueList,
+      onlineCount: count,
+    });
+
+    broadcast({
+      type: "onlineFarmsUpdated",
+      farms: uniqueList,
+      players: uniqueList,
+      onlineCount: count,
+    });
+  }
+
+  function getPeersInRoom(roomId, excludeWs = null, callerUserId = null) {
     const list = [];
     const targetFarmId = roomId.startsWith("farm_") ? roomId.replace("farm_", "") : null;
     let foundOwner = false;
 
-    for (const [clientWs, info] of clients.entries()) {
-      const isOwner = targetFarmId ? String(info.farmId) === targetFarmId : false;
-      const isTarget =
-        info.roomId === roomId ||
-        (targetFarmId && String(info.farmId) === targetFarmId);
+    // Nếu người gọi chính là chủ nông trại đang xem phòng này
+    if (callerUserId) {
+      const caller = onlinePlayers.get(callerUserId);
+      if (caller && targetFarmId && String(caller.farmId) === String(targetFarmId)) {
+        foundOwner = true;
+      }
+    }
 
-      if (
-        isTarget &&
-        clientWs !== excludeWs &&
-        clientWs.readyState === 1
-      ) {
+    for (const player of onlinePlayers.values()) {
+      // Tuyệt đối không trả về chính client đang gọi
+      if (player.ws === excludeWs || (callerUserId && player.userId === callerUserId)) {
+        if (targetFarmId && String(player.farmId) === targetFarmId) {
+          foundOwner = true;
+        }
+        continue;
+      }
+
+      const isOwner = targetFarmId ? String(player.farmId) === targetFarmId : false;
+      const isTarget =
+        player.roomId === roomId ||
+        player.currentRoom === roomId ||
+        (targetFarmId && String(player.farmId) === targetFarmId);
+
+      if (isTarget && player.ws && player.ws.readyState === 1 /* OPEN */) {
         if (isOwner) foundOwner = true;
         list.push({
-          id: info.id,
-          name: info.username || info.name,
-          username: info.username || info.name,
-          gender: info.gender || "male",
-          avatar: info.avatar || "👨‍🌾",
-          farmId: info.farmId,
-          roomId: info.roomId,
-          level: info.level || 1,
-          ripeCrops: info.ripeCrops || 0,
-          isMicOn: !!info.isMicOn,
-          isSpeaking: !!info.isSpeaking,
-          x: info.x || 0,
-          y: info.y || 0,
-          facingLeft: !!info.facingLeft,
-          bumpkin: info.bumpkin || null,
+          id: player.id,
+          userId: player.userId,
+          name: player.username || player.name,
+          username: player.username || player.name,
+          gender: player.gender || "male",
+          avatar: player.avatar || "👨‍🌾",
+          farmId: player.farmId,
+          roomId: player.roomId || player.currentRoom,
+          level: player.level || 1,
+          ripeCrops: player.ripeCrops || 0,
+          isMicOn: !!player.isMicOn,
+          isSpeaking: !!player.isSpeaking,
+          x: player.x || 0,
+          y: player.y || 0,
+          facingLeft: !!player.facingLeft,
+          bumpkin: player.bumpkin || null,
           isOwner,
         });
       }
     }
 
     // Nếu người chơi đang ghé thăm một nông trại cụ thể (farm_xxx) mà chủ vườn chưa online hoặc ở phòng khác,
-    // luôn đưa nhân vật Chủ Vườn vào danh sách người chơi trên đảo
+    // đưa nhân vật Chủ Vườn ảo (NPC) vào phòng
     if (targetFarmId && !foundOwner) {
       const savedFarm = getFarmState(targetFarmId);
       let ownerName = savedFarm?.username || savedFarm?.name || "";
       if (!ownerName || /^Nông Dân\s+\d+$/.test(ownerName) || ownerName.startsWith("Chủ Vườn #")) {
-        for (const info of clients.values()) {
-          if (String(info.farmId) === String(targetFarmId) && (info.username || info.name) && !/^Nông Dân\s+\d+$/.test(info.username || info.name)) {
-            ownerName = info.username || info.name;
+        for (const p of onlinePlayers.values()) {
+          if (String(p.farmId) === String(targetFarmId) && (p.username || p.name) && !/^Nông Dân\s+\d+$/.test(p.username || p.name)) {
+            ownerName = p.username || p.name;
             break;
           }
         }
@@ -190,6 +264,7 @@ function setupMultiplayerHub(httpServer) {
 
       list.push({
         id: `host_${targetFarmId}`,
+        userId: `farm_${targetFarmId}`,
         name: ownerName,
         username: ownerName,
         avatar: savedFarm?.avatar || "👨‍🌾",
@@ -210,39 +285,21 @@ function setupMultiplayerHub(httpServer) {
     return list;
   }
 
-  function getOnlinePlayersList() {
-    return Array.from(clients.values()).map((p) => ({
-      id: p.id,
-      name: p.username || p.name,
-      username: p.username || p.name,
-      gender: p.gender || "male",
-      avatar: p.avatar || "👨‍🌾",
-      farmId: p.farmId,
-      roomId: p.roomId,
-      level: p.level || 1,
-      ripeCrops: p.ripeCrops || 0,
-      isMicOn: !!p.isMicOn,
-      isSpeaking: !!p.isSpeaking,
-      bumpkin: p.bumpkin || null,
-      x: p.x || 0,
-      y: p.y || 0,
-    }));
-  }
-
   wss.on("connection", (ws, req) => {
-    const playerId = "p_" + Math.random().toString(36).substring(2, 9);
+    let playerId = "p_" + Math.random().toString(36).substring(2, 9);
     let playerName = "";
     let defaultFarmId = Math.floor(Math.random() * 8000 + 1000);
-    const defaultRoomId = "lang_mieuthien";
-    let defaultAvatar =
-      DEFAULT_AVATARS[Math.floor(Math.random() * DEFAULT_AVATARS.length)];
+    let defaultRoomId = "lang_mieuthien";
+    let defaultAvatar = DEFAULT_AVATARS[Math.floor(Math.random() * DEFAULT_AVATARS.length)];
     let playerGender = "male";
+    let clientUserId = null;
 
     try {
       const parsedUrl = new URL(
         req.url,
         `http://${req.headers?.host || "localhost"}`
       );
+      const qUserId = parsedUrl.searchParams.get("userId");
       const qUsername = parsedUrl.searchParams.get("username") || parsedUrl.searchParams.get("name");
       const qAvatar = parsedUrl.searchParams.get("avatar");
       const qFarmId = parsedUrl.searchParams.get("farmId");
@@ -259,39 +316,77 @@ function setupMultiplayerHub(httpServer) {
       }
       if (qFarmId && qFarmId.trim()) {
         defaultFarmId = qFarmId.trim();
+        defaultRoomId = `farm_${defaultFarmId}`;
       }
+
+      clientUserId = getCanonicalUserId({
+        userId: qUserId,
+        farmId: defaultFarmId,
+        username: playerName,
+      });
     } catch (e) {}
 
-    // Chỉ gán tên dự phòng nếu client không truyền tên
     if (!playerName || playerName.trim() === "") {
       playerName = `Nông Dân ${playerId.slice(2, 6)}`;
     }
 
-    const playerInfo = {
+    if (!clientUserId) {
+      clientUserId = `usr_${playerId}`;
+    }
+
+    // 1. KIỂM TRA VÀ NGẮT KẾT NỐI MA (KICK CŨ NẾU ĐÃ TỒN TẠI PHIÊN CỦA USER ID NÀY)
+    if (onlinePlayers.has(clientUserId)) {
+      const oldSession = onlinePlayers.get(clientUserId);
+      if (oldSession && oldSession.ws && oldSession.ws !== ws) {
+        console.log(`[Multiplayer Hub] Phát hiện phiên cũ của ${clientUserId}, ngắt socket ma: ${oldSession.id}`);
+        try {
+          oldSession.ws.send(
+            JSON.stringify({
+              type: "forceDisconnect",
+              reason: "Tài khoản vừa kết nối từ thiết bị hoặc tab khác",
+            })
+          );
+          oldSession.ws.close(4001, "Replaced by newer session");
+        } catch (e) {}
+        socketToUser.delete(oldSession.ws);
+      }
+    }
+
+    // 2. GHI ĐÈ SESSION MỚI VÀO MAP
+    const playerRecord = {
+      userId: clientUserId,
       id: playerId,
+      ws: ws,
       name: playerName,
       username: playerName,
       gender: playerGender,
       avatar: defaultAvatar,
       farmId: defaultFarmId,
       roomId: defaultRoomId,
+      currentRoom: defaultRoomId,
       level: 1,
       ripeCrops: Math.floor(Math.random() * 5 + 2),
       isMicOn: false,
       isSpeaking: false,
       x: 0,
       y: 0,
-      joinedAt: Date.now(),
+      facingLeft: false,
+      bumpkin: null,
+      lastActive: Date.now(),
     };
 
+    onlinePlayers.set(clientUserId, playerRecord);
+    socketToUser.set(ws, clientUserId);
+
+    ws.userId = clientUserId;
     ws.username = playerName;
     ws.gender = playerGender;
-    clients.set(ws, playerInfo);
 
-    // Gửi dữ liệu khởi tạo cho client vừa kết nối
+    // Gửi dữ liệu khởi tạo cho client
     ws.send(
       JSON.stringify({
         type: "init",
+        userId: clientUserId,
         selfId: playerId,
         name: playerName,
         username: playerName,
@@ -304,30 +399,31 @@ function setupMultiplayerHub(httpServer) {
       })
     );
 
-    // Gửi danh sách người chơi đang ở cùng phòng làng Miêu Thiện
+    // Gửi danh sách người chơi trong phòng cho người mới
     ws.send(
       JSON.stringify({
         type: "room_peers",
         roomId: defaultRoomId,
-        peers: getPeersInRoom(defaultRoomId, ws),
+        peers: getPeersInRoom(defaultRoomId, ws, clientUserId),
       })
     );
 
-    // Báo cho các người chơi khác trong phòng làng
+    // Báo cho các người chơi khác trong phòng
     broadcastToRoom(
       defaultRoomId,
       {
         type: "peer_joined_room",
         player: {
           id: playerId,
+          userId: clientUserId,
           name: playerName,
           username: playerName,
           gender: playerGender,
           avatar: defaultAvatar,
           farmId: defaultFarmId,
           roomId: defaultRoomId,
-          level: playerInfo.level,
-          ripeCrops: playerInfo.ripeCrops,
+          level: playerRecord.level,
+          ripeCrops: playerRecord.ripeCrops,
           isMicOn: false,
           bumpkin: null,
           x: 0,
@@ -337,26 +433,8 @@ function setupMultiplayerHub(httpServer) {
       ws
     );
 
-    // Thông báo cho mọi người có người chơi mới
-    broadcast(
-      {
-        type: "player_joined",
-        player: {
-          id: playerId,
-          name: playerName,
-          username: playerName,
-          gender: playerGender,
-          avatar: defaultAvatar,
-          farmId: defaultFarmId,
-          roomId: defaultRoomId,
-          level: playerInfo.level,
-          ripeCrops: playerInfo.ripeCrops,
-          isMicOn: false,
-        },
-        onlineCount: clients.size,
-      },
-      ws
-    );
+    // Broadcast danh sách cập nhật mới nhất cho toàn server
+    broadcastOnlineFarms();
 
     // Tin nhắn hệ thống chào mừng
     const welcomeMsg = {
@@ -374,8 +452,40 @@ function setupMultiplayerHub(httpServer) {
     ws.on("message", (raw) => {
       try {
         const data = JSON.parse(raw.toString());
+        const curUserId = socketToUser.get(ws);
+        const playerInfo = curUserId ? onlinePlayers.get(curUserId) : null;
+        if (!playerInfo) return;
+
+        playerInfo.lastActive = Date.now();
 
         if (data.type === "joinGame" || data.type === "join") {
+          const newUserId = getCanonicalUserId(data) || curUserId;
+
+          // Nếu client gửi userId định danh cụ thể khác với temp userId ban đầu
+          if (newUserId && newUserId !== curUserId) {
+            // Kick phiên cũ nếu có
+            if (onlinePlayers.has(newUserId)) {
+              const old = onlinePlayers.get(newUserId);
+              if (old && old.ws && old.ws !== ws) {
+                try {
+                  old.ws.send(
+                    JSON.stringify({
+                      type: "forceDisconnect",
+                      reason: "Tài khoản vừa kết nối từ tab khác",
+                    })
+                  );
+                  old.ws.close(4001, "Replaced by newer session");
+                } catch (e) {}
+                socketToUser.delete(old.ws);
+              }
+            }
+            onlinePlayers.delete(curUserId);
+            playerInfo.userId = newUserId;
+            onlinePlayers.set(newUserId, playerInfo);
+            socketToUser.set(ws, newUserId);
+            ws.userId = newUserId;
+          }
+
           const reqName = data.username || data.name;
           if (reqName && typeof reqName === "string" && reqName.trim() !== "") {
             playerInfo.name = reqName.trim().substring(0, 24);
@@ -391,7 +501,7 @@ function setupMultiplayerHub(httpServer) {
           if (data.farmId) {
             playerInfo.farmId = data.farmId;
             playerInfo.roomId = `farm_${data.farmId}`;
-            // Đồng bộ tên thật vào nông trại
+            playerInfo.currentRoom = playerInfo.roomId;
             const curFarm = getFarmState(playerInfo.farmId);
             if (curFarm) {
               curFarm.name = playerInfo.name;
@@ -402,11 +512,7 @@ function setupMultiplayerHub(httpServer) {
           if (data.level) playerInfo.level = Number(data.level) || 1;
           if (typeof data.ripeCrops === "number") playerInfo.ripeCrops = data.ripeCrops;
 
-          broadcast({
-            type: "players_update",
-            players: getOnlinePlayersList(),
-            onlineCount: clients.size,
-          });
+          broadcastOnlineFarms();
         } else if (data.type === "visitFarm") {
           const targetFarmId = String(data.targetFarmId || data.farmId || "").replace("farm_", "");
           const visitorName = data.visitorName || data.username || data.name;
@@ -428,6 +534,7 @@ function setupMultiplayerHub(httpServer) {
               {
                 type: "peer_left_room",
                 playerId: playerInfo.id,
+                userId: playerInfo.userId,
                 name: playerInfo.name,
                 username: playerInfo.username,
               },
@@ -436,6 +543,7 @@ function setupMultiplayerHub(httpServer) {
           }
 
           playerInfo.roomId = newRoom;
+          playerInfo.currentRoom = newRoom;
 
           broadcastToRoom(
             newRoom,
@@ -443,6 +551,7 @@ function setupMultiplayerHub(httpServer) {
               type: "peer_joined_room",
               player: {
                 id: playerInfo.id,
+                userId: playerInfo.userId,
                 name: playerInfo.name,
                 username: playerInfo.username,
                 avatar: playerInfo.avatar || "👨‍🌾",
@@ -464,23 +573,15 @@ function setupMultiplayerHub(httpServer) {
             JSON.stringify({
               type: "room_peers",
               roomId: newRoom,
-              peers: getPeersInRoom(newRoom, ws),
+              peers: getPeersInRoom(newRoom, ws, playerInfo.userId),
             })
           );
 
-          broadcast({
-            type: "players_update",
-            players: getOnlinePlayersList(),
-            onlineCount: clients.size,
-          });
+          broadcastOnlineFarms();
         } else if (data.type === "set_avatar") {
           if (data.avatar) {
             playerInfo.avatar = String(data.avatar);
-            broadcast({
-              type: "players_update",
-              players: getOnlinePlayersList(),
-              onlineCount: clients.size,
-            });
+            broadcastOnlineFarms();
           }
         } else if (data.type === "join_room") {
           const reqName = data.username || data.name;
@@ -501,6 +602,7 @@ function setupMultiplayerHub(httpServer) {
               {
                 type: "peer_left_room",
                 playerId: playerInfo.id,
+                userId: playerInfo.userId,
                 name: playerInfo.name,
                 username: playerInfo.username,
               },
@@ -509,6 +611,7 @@ function setupMultiplayerHub(httpServer) {
           }
 
           playerInfo.roomId = newRoom;
+          playerInfo.currentRoom = newRoom;
 
           broadcastToRoom(
             newRoom,
@@ -516,6 +619,7 @@ function setupMultiplayerHub(httpServer) {
               type: "peer_joined_room",
               player: {
                 id: playerInfo.id,
+                userId: playerInfo.userId,
                 name: playerInfo.name,
                 username: playerInfo.username,
                 avatar: playerInfo.avatar || "👨‍🌾",
@@ -537,47 +641,38 @@ function setupMultiplayerHub(httpServer) {
             JSON.stringify({
               type: "room_peers",
               roomId: newRoom,
-              peers: getPeersInRoom(newRoom, ws),
+              peers: getPeersInRoom(newRoom, ws, playerInfo.userId),
             })
           );
 
-            broadcast({
-              type: "players_update",
-              players: getOnlinePlayersList(),
-              onlineCount: clients.size,
-            });
+          broadcastOnlineFarms();
         } else if (data.type === "leave_room") {
           const oldRoom = playerInfo.roomId;
           if (oldRoom) {
             playerInfo.roomId = `farm_${playerInfo.farmId || playerInfo.id}`;
+            playerInfo.currentRoom = playerInfo.roomId;
             broadcastToRoom(
               oldRoom,
               {
                 type: "peer_left_room",
                 playerId: playerInfo.id,
+                userId: playerInfo.userId,
                 name: playerInfo.name,
                 username: playerInfo.username,
               },
               ws
             );
 
-            broadcast({
-              type: "players_update",
-              players: getOnlinePlayersList(),
-              onlineCount: clients.size,
-            });
+            broadcastOnlineFarms();
           }
         } else if (data.type === "chat") {
           const text = String(data.text || "").trim().substring(0, 200);
           if (!text) return;
 
           const msg = {
-            id:
-              "msg_" +
-              Date.now() +
-              "_" +
-              Math.random().toString(36).substring(2, 5),
+            id: "msg_" + Date.now() + "_" + Math.random().toString(36).substring(2, 5),
             playerId: playerInfo.id,
+            userId: playerInfo.userId,
             name: playerInfo.name,
             avatar: playerInfo.avatar || "👨‍🌾",
             text,
@@ -593,6 +688,7 @@ function setupMultiplayerHub(httpServer) {
           broadcast({
             type: "emote",
             playerId: playerInfo.id,
+            userId: playerInfo.userId,
             name: playerInfo.name,
             avatar: playerInfo.avatar || "👨‍🌾",
             emoji,
@@ -606,7 +702,6 @@ function setupMultiplayerHub(httpServer) {
             playerInfo.username = newName;
             ws.username = newName;
 
-            // Đồng bộ tên mới vào bộ nhớ nông trại nếu có
             if (playerInfo.farmId) {
               const currentFarm = getFarmState(playerInfo.farmId);
               if (currentFarm) {
@@ -626,20 +721,17 @@ function setupMultiplayerHub(httpServer) {
             };
             recentMessages.push(renameMsg);
             broadcast({ type: "chat", ...renameMsg });
-            broadcast({
-              type: "players_update",
-              players: getOnlinePlayersList(),
-              onlineCount: clients.size,
-            });
+            broadcastOnlineFarms();
           }
         } else if (data.type === "voice_signal") {
           const targetId = data.targetId;
-          for (const [targetWs, info] of clients.entries()) {
-            if (info.id === targetId && targetWs.readyState === 1 /* OPEN */) {
-              targetWs.send(
+          for (const targetPlayer of onlinePlayers.values()) {
+            if ((targetPlayer.id === targetId || targetPlayer.userId === targetId) && targetPlayer.ws && targetPlayer.ws.readyState === 1) {
+              targetPlayer.ws.send(
                 JSON.stringify({
                   type: "voice_signal",
                   senderId: playerInfo.id,
+                  userId: playerInfo.userId,
                   signal: data.signal,
                 })
               );
@@ -651,6 +743,7 @@ function setupMultiplayerHub(httpServer) {
           broadcastToRoom(playerInfo.roomId, {
             type: "voice_status",
             playerId: playerInfo.id,
+            userId: playerInfo.userId,
             name: playerInfo.name,
             avatar: playerInfo.avatar || "👨‍🌾",
             isMicOn: playerInfo.isMicOn,
@@ -659,31 +752,29 @@ function setupMultiplayerHub(httpServer) {
             broadcastToRoom(`farm_${playerInfo.farmId}`, {
               type: "voice_status",
               playerId: playerInfo.id,
+              userId: playerInfo.userId,
               name: playerInfo.name,
               avatar: playerInfo.avatar || "👨‍🌾",
               isMicOn: playerInfo.isMicOn,
             });
           }
-          broadcast({
-            type: "players_update",
-            players: getOnlinePlayersList(),
-            onlineCount: clients.size,
-          });
+          broadcastOnlineFarms();
         } else if (data.type === "voice_speaking") {
           playerInfo.isSpeaking = !!data.speaking;
           broadcastToRoom(playerInfo.roomId, {
             type: "voice_speaking",
             playerId: playerInfo.id,
+            userId: playerInfo.userId,
             speaking: !!data.speaking,
           });
           if (playerInfo.farmId && playerInfo.roomId !== `farm_${playerInfo.farmId}`) {
             broadcastToRoom(`farm_${playerInfo.farmId}`, {
               type: "voice_speaking",
               playerId: playerInfo.id,
+              userId: playerInfo.userId,
               speaking: !!data.speaking,
             });
           }
-        
         } else if (data.type === "sync_farm_state") {
           const syncFarmId = String(data.farmId || playerInfo.farmId);
           if (data.bumpkin) playerInfo.bumpkin = data.bumpkin;
@@ -722,6 +813,7 @@ function setupMultiplayerHub(httpServer) {
           broadcast({
             type: "player_bumpkin_updated",
             playerId: playerInfo.id,
+            userId: playerInfo.userId,
             bumpkin: data.bumpkin
           });
         } else if (data.type === "player_position") {
@@ -735,6 +827,7 @@ function setupMultiplayerHub(httpServer) {
           const posPayload = {
             type: "player_position",
             playerId: playerInfo.id,
+            userId: playerInfo.userId,
             farmId: playerInfo.farmId,
             x: playerInfo.x,
             y: playerInfo.y,
@@ -752,11 +845,7 @@ function setupMultiplayerHub(httpServer) {
           if (data.avatar) playerInfo.avatar = String(data.avatar);
           if (data.level) playerInfo.level = Number(data.level) || 1;
           if (typeof data.ripeCrops === "number") playerInfo.ripeCrops = data.ripeCrops;
-          broadcast({
-            type: "players_update",
-            players: getOnlinePlayersList(),
-            onlineCount: clients.size,
-          });
+          broadcastOnlineFarms();
         } else if (data.type === "crop_steal") {
           const targetFarmId = data.targetFarmId;
           const cropName = data.cropName || "Nông sản";
@@ -765,6 +854,7 @@ function setupMultiplayerHub(httpServer) {
           broadcast({
             type: "crop_steal_event",
             thiefId: playerInfo.id,
+            userId: playerInfo.userId,
             thiefName,
             thiefAvatar: playerInfo.avatar || "🥷",
             targetFarmId,
@@ -792,6 +882,7 @@ function setupMultiplayerHub(httpServer) {
           broadcast({
             type: "crop_help_event",
             helperId: playerInfo.id,
+            userId: playerInfo.userId,
             helperName,
             helperAvatar: playerInfo.avatar || "👨‍🌾",
             targetFarmId,
@@ -817,37 +908,47 @@ function setupMultiplayerHub(httpServer) {
       }
     });
 
+    // 4. DỌN DẸP NGAY LẬP TỨC KHI NGẮT KẾT NỐI (CLEANUP EXACT SOCKET)
     ws.on("close", () => {
-      const p = clients.get(ws);
-      clients.delete(ws);
+      const uId = socketToUser.get(ws);
+      if (uId) {
+        const currentSession = onlinePlayers.get(uId);
+        // Chỉ xóa khỏi danh sách online nếu socket vừa rớt đúng là socket đang giữ quyền active
+        if (currentSession && currentSession.ws === ws) {
+          onlinePlayers.delete(uId);
+          console.log(`[Multiplayer Hub] Đã dọn dẹp người chơi ${uId} khỏi danh sách online`);
 
-      if (p) {
-        if (p.roomId) {
-          broadcastToRoom(p.roomId, {
-            type: "peer_left_room",
-            playerId: p.id,
-            name: p.name,
+          if (currentSession.roomId) {
+            broadcastToRoom(currentSession.roomId, {
+              type: "peer_left_room",
+              playerId: currentSession.id,
+              userId: currentSession.userId,
+              name: currentSession.name,
+            });
+          }
+
+          const leaveMsg = {
+            id: "sys_" + Date.now(),
+            name: "🌾 Làng Miêu Thiện",
+            avatar: "🌾",
+            text: `${currentSession.avatar || "👨‍🌾"} ${currentSession.name} đã tạm rời Làng Miêu Thiện.`,
+            time: Date.now(),
+            isSystem: true,
+          };
+          recentMessages.push(leaveMsg);
+          broadcast({ type: "chat", ...leaveMsg });
+
+          broadcast({
+            type: "player_left",
+            playerId: currentSession.id,
+            userId: currentSession.userId,
+            name: currentSession.name,
+            onlineCount: onlinePlayers.size,
           });
+
+          broadcastOnlineFarms();
         }
-
-        const leaveMsg = {
-          id: "sys_" + Date.now(),
-          name: "🌾 Làng Miêu Thiện",
-          avatar: "🌾",
-          text: `${p.avatar || "👨‍🌾"} ${p.name} đã tạm rời Làng Miêu Thiện.`,
-          time: Date.now(),
-          isSystem: true,
-        };
-        recentMessages.push(leaveMsg);
-        broadcast({ type: "chat", ...leaveMsg });
-
-        broadcast({
-          type: "player_left",
-          playerId: p.id,
-          name: p.name,
-          onlineCount: clients.size,
-          players: getOnlinePlayersList(),
-        });
+        socketToUser.delete(ws);
       }
     });
 
@@ -857,7 +958,7 @@ function setupMultiplayerHub(httpServer) {
   });
 
   console.log(
-    "🌾 [LÀNG MIEUTHIEN] Realtime Multiplayer, Voice, Avatars & Visiting Hub đã kích hoạt trên /ws/chat!"
+    "🌾 [LÀNG MIEUTHIEN] Realtime Multiplayer, Voice, Avatars & Visiting Hub đã kích hoạt trên /ws/chat (Deduplicated Map Session)!"
   );
 }
 
