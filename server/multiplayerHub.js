@@ -740,7 +740,8 @@ function setupMultiplayerHub(httpServer) {
           }
         } else if (data.type === "voice_status") {
           playerInfo.isMicOn = !!data.isMicOn;
-          broadcastToRoom(playerInfo.roomId, {
+          // KÊNH THOẠI TOÀN LÀNG: Phát trạng thái mic cho toàn bộ người chơi trong làng
+          broadcast({
             type: "voice_status",
             playerId: playerInfo.id,
             userId: playerInfo.userId,
@@ -748,33 +749,18 @@ function setupMultiplayerHub(httpServer) {
             avatar: playerInfo.avatar || "👨‍🌾",
             isMicOn: playerInfo.isMicOn,
           });
-          if (playerInfo.farmId && playerInfo.roomId !== `farm_${playerInfo.farmId}`) {
-            broadcastToRoom(`farm_${playerInfo.farmId}`, {
-              type: "voice_status",
-              playerId: playerInfo.id,
-              userId: playerInfo.userId,
-              name: playerInfo.name,
-              avatar: playerInfo.avatar || "👨‍🌾",
-              isMicOn: playerInfo.isMicOn,
-            });
-          }
           broadcastOnlineFarms();
         } else if (data.type === "voice_speaking") {
           playerInfo.isSpeaking = !!data.speaking;
-          broadcastToRoom(playerInfo.roomId, {
+          // KÊNH THOẠI TOÀN LÀNG: Phát tín hiệu đang nói cho toàn bộ người chơi trong làng
+          broadcast({
             type: "voice_speaking",
             playerId: playerInfo.id,
             userId: playerInfo.userId,
+            name: playerInfo.name,
+            avatar: playerInfo.avatar || "👨‍🌾",
             speaking: !!data.speaking,
           });
-          if (playerInfo.farmId && playerInfo.roomId !== `farm_${playerInfo.farmId}`) {
-            broadcastToRoom(`farm_${playerInfo.farmId}`, {
-              type: "voice_speaking",
-              playerId: playerInfo.id,
-              userId: playerInfo.userId,
-              speaking: !!data.speaking,
-            });
-          }
         } else if (data.type === "sync_farm_state") {
           const syncFarmId = String(data.farmId || playerInfo.farmId);
           if (data.bumpkin) playerInfo.bumpkin = data.bumpkin;

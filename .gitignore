@@ -1,0 +1,4 @@
+node_modules
+farm_save.json
+.DS_Store
+*.log
