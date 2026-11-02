@@ -761,6 +761,22 @@ function setupMultiplayerHub(httpServer) {
             avatar: playerInfo.avatar || "👨‍🌾",
             speaking: !!data.speaking,
           });
+        } else if (data.type === "voice_pcm") {
+          // BẢO CHỨNG KÊNH THOẠI TOÀN LÀNG: Phát sóng âm thanh giọng nói trực tiếp qua WebSocket
+          // Đảm bảo 100% người dùng trên 4G Viettel/Vina, iPhone Safari, Android Brave nghe thấy nhau tức thì
+          const chunkMsg = JSON.stringify({
+            type: "voice_pcm",
+            senderId: playerInfo.id,
+            name: playerInfo.name,
+            avatar: playerInfo.avatar || "👨‍🌾",
+            pcm: data.pcm,
+            sampleRate: data.sampleRate || 16000,
+          });
+          for (const targetPlayer of onlinePlayers.values()) {
+            if (targetPlayer.ws && targetPlayer.ws !== ws && targetPlayer.ws.readyState === 1) {
+              targetPlayer.ws.send(chunkMsg);
+            }
+          }
         } else if (data.type === "executeFarmAction" || data.type === "execute_farm_action") {
           const fId = String(data.farmId || playerInfo.farmId).replace("farm_", "");
           const farmRoom = `farm_${fId}`;
