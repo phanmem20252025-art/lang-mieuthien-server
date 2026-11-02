@@ -125,7 +125,35 @@ function setupMultiplayerHub(httpServer) {
     const payload = JSON.stringify(data);
     for (const player of onlinePlayers.values()) {
       if (player.ws && player.ws !== excludeWs && player.ws.readyState === 1 /* OPEN */) {
-        player.ws.send(payload);
+        try {
+          player.ws.send(payload);
+        } catch (e) {}
+      }
+    }
+  }
+
+  function broadcastVoice(data, senderWs = null) {
+    const raw = typeof data === "string" ? data : JSON.stringify(data);
+    const sentSockets = new Set();
+
+    // 1. Gửi qua onlinePlayers (kênh đang hoạt động hoàn hảo chuyển tiếp voice_speaking)
+    for (const player of onlinePlayers.values()) {
+      if (player.ws && player.ws !== senderWs && player.ws.readyState === 1 /* OPEN */) {
+        try {
+          player.ws.send(raw);
+          sentSockets.add(player.ws);
+        } catch (e) {}
+      }
+    }
+
+    // 2. Gửi thêm cho bất kỳ socket nào trong wss.clients chưa được gửi
+    if (wss && wss.clients) {
+      for (const client of wss.clients) {
+        if (client !== senderWs && !sentSockets.has(client) && client.readyState === 1 /* OPEN */) {
+          try {
+            client.send(raw);
+          } catch (e) {}
+        }
       }
     }
   }
@@ -478,9 +506,9 @@ function setupMultiplayerHub(httpServer) {
 
           const senderId = data.senderId || ws.playerId || playerId;
           const senderName = data.senderName || ws.username || playerName || "Dân Làng";
-          const mimeType = data.mimeType || "audio/webm";
+          const mimeType = data.mimeType || "audio/wav";
 
-          console.log(`[VOICE SERVER] Nhận từ ${senderName} (${senderId}) - Broadcast tới ${wss.clients.size - 1} người chơi khác`);
+          console.log(`[VOICE SERVER] Nhận từ ${senderName} (${senderId}) - Broadcast toàn làng`);
 
           const broadcastPayload = JSON.stringify({
             type: "incomingVoice",
@@ -491,12 +519,7 @@ function setupMultiplayerHub(httpServer) {
             audioBuffer: data.audioBuffer,
           });
 
-          // 2. Chuyển tiếp ngay lập tức tới TẤT CẢ người chơi khác (Broadcast toàn hệ thống)
-          for (const client of wss.clients) {
-            if (client !== ws && client.readyState === 1 /* OPEN */) {
-              client.send(broadcastPayload);
-            }
-          }
+          broadcastVoice(broadcastPayload, ws);
           return;
         }
 
@@ -515,11 +538,7 @@ function setupMultiplayerHub(httpServer) {
             sampleRate: data.sampleRate || 16000,
           });
 
-          for (const client of wss.clients) {
-            if (client !== ws && client.readyState === 1 /* OPEN */) {
-              client.send(pcmPayload);
-            }
-          }
+          broadcastVoice(pcmPayload, ws);
           return;
         }
 
