@@ -433,6 +433,23 @@ function setupMultiplayerHub(httpServer) {
       ws
     );
 
+    // KÊNH THOẠI TOÀN LÀNG: Phát sóng cho toàn bộ làng để kết nối đàm thoại WebRTC ngay lập tức
+    broadcast(
+      {
+        type: "player_joined_village",
+        player: {
+          id: playerId,
+          userId: clientUserId,
+          name: playerName,
+          username: playerName,
+          gender: playerGender,
+          avatar: defaultAvatar,
+          farmId: defaultFarmId,
+        },
+      },
+      ws
+    );
+
     // Broadcast danh sách cập nhật mới nhất cho toàn server
     broadcastOnlineFarms();
 
