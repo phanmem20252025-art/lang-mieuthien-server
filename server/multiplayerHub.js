@@ -761,6 +761,42 @@ function setupMultiplayerHub(httpServer) {
             avatar: playerInfo.avatar || "👨‍🌾",
             speaking: !!data.speaking,
           });
+        } else if (data.type === "executeFarmAction" || data.type === "execute_farm_action") {
+          const fId = String(data.farmId || playerInfo.farmId).replace("farm_", "");
+          const farmRoom = `farm_${fId}`;
+
+          // 1. Cập nhật trạng thái nông trại trên server memory
+          if (data.farmState) {
+            saveFarmState(fId, {
+              farmId: fId,
+              farmState: data.farmState,
+              bumpkin: playerInfo.bumpkin,
+              name: playerInfo.name,
+              username: playerInfo.username,
+              avatar: playerInfo.avatar,
+              x: playerInfo.x || 0,
+              y: playerInfo.y || 0,
+              updatedAt: Date.now(),
+            });
+          }
+
+          // 2. Phát sóng ngay lập tức cho TOÀN BỘ người chơi đang có mặt trong vườn
+          broadcastToRoom(farmRoom, {
+            type: "farmActionBroadcast",
+            actorId: playerInfo.id,
+            actorUserId: playerInfo.userId,
+            actorName: playerInfo.name,
+            actorAvatar: playerInfo.avatar,
+            actorBumpkin: playerInfo.bumpkin,
+            farmId: fId,
+            actionType: data.actionType, // 'till', 'water', 'plant', 'harvest', 'chop_tree', 'mine_rock'
+            tileIndex: data.tileIndex,
+            coords: data.coords,         // { x, y }
+            tool: data.tool,
+            itemData: data.itemData,
+            farmState: data.farmState,
+            timestamp: Date.now(),
+          }, ws);
         } else if (data.type === "sync_farm_state") {
           const syncFarmId = String(data.farmId || playerInfo.farmId);
           if (data.bumpkin) playerInfo.bumpkin = data.bumpkin;
